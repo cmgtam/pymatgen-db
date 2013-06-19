@@ -774,6 +774,7 @@ class NEBToDbTaskDrone(VaspToDbTaskDrone):
     def generate_doc(cls, dir_name, vasprun_files, parse_dos,
                      additional_fields):
         """Process aflow style and NEB runs."""
+        print "TTM DEBUG: In generate_doc for NEB task drone."
         try:
             fullpath = os.path.abspath(dir_name)
             #Defensively copy the additional fields first.  This is a MUST.
@@ -782,6 +783,7 @@ class NEBToDbTaskDrone(VaspToDbTaskDrone):
             d = {k: v for k, v in additional_fields.items()} \
                 if additional_fields else {}
             d["dir_name"] = fullpath
+            print "TTM DEBUG: fullpath: ", fullpath
             d["schema_version"] = NEBToDbTaskDrone.__version__
             d["calculations"] = [
                 cls.process_vasprun(dir_name, taskname, filename, parse_dos)
@@ -836,6 +838,7 @@ class NEBToDbTaskDrone(VaspToDbTaskDrone):
             # Some useful values are calculated.
 
             # Number of NEB images
+            print "TTM DEBUG: At NEB processing stage."
             image_list = []
             for i in xrange(0,9):
                 append = "0"+str(i)
@@ -843,7 +846,7 @@ class NEBToDbTaskDrone(VaspToDbTaskDrone):
                 if os.path.exists(newpath):
                     image_list.append(newpath)
             d["num_images"] = len(image_list)
-
+            print "TTM DEBUG: Image list:", image_list
             # Image energies and magnetic moments for specific folders
             list_image_energies = []
             list_image_mags = []
@@ -858,12 +861,10 @@ class NEBToDbTaskDrone(VaspToDbTaskDrone):
                 d["mag_"+append]= val_mag
                 list_image_energies.append(val_energy)
                 list_image_mags.append(val_mag)
-
+            print "TTM DEBUG: first occurrence list_image_mags", list_image_mags
             # List of image energies and magnetic moments in order 
             image_energies = ' '.join(map(str,list_image_energies))
-            image_mags = ' '.join(map(str,list_image_mags))
             d["image_energies"] = image_energies
-            d["image_mags"] = image_mags
 
             # An simple way to visualize relative image energies and magnetic moments
             energy_contour = "-x-"
@@ -877,43 +878,48 @@ class NEBToDbTaskDrone(VaspToDbTaskDrone):
                 else:
                     energy_contour += "=-x-"
             d["energy_contour"] = energy_contour
-
-            mag_contour = "-o-"
-            if len(image_list)==0:
-                return None
-            for i in xrange(1,len(image_list)):
-                if(list_image_mags[i]>list_image_mags[i-1]):
-                    mag_contour += "/-o-"
-                elif list_image_mags[i]<list_image_mags[i-1]:
-                    mag_contour += "\\-o-"
-                else:
-                    mag_contour += "=-o-"
-            d["mag_contour"] = mag_contour
+            print "TTM DEBUG: energy contour:", energy_contour
 
             # Difference between the first and maximum energies and magnetic moments
             deltaE_firstmax = max(list_image_energies) - list_image_energies[0] 
             d["deltaE_firstmax"] = deltaE_firstmax
-            deltaM_firstmax = max(list_image_mags) - list_image_mags[0]
-            d["deltaM_firstmax"] = deltaM_firstmax
-            
             # Difference between the last and maximum energies and magnetic moments
             deltaE_lastmax = max(list_image_energies) - list_image_energies[-1]
             d["deltaE_lastmax"] = deltaE_lastmax
-            deltaM_lastmax = max(list_image_mags) - list_image_mags[-1]
-            d["deltaM_lastmax"] = deltaM_lastmax
 
             # Difference between the endpoint energies and magnetic moments
             deltaE_endpoints = list_image_energies[-1] - list_image_energies[0]
             d["deltaE_endpoints"] = deltaE_endpoints
-            deltaM_endpoints = list_image_mags[-1] - list_image_mags[0]
-            d["deltaM_endpoints"] = deltaM_endpoints
 
             # Difference between the minimum and maximum energies and magnetic moments
             deltaE_maxmin = max(list_image_energies) - min(list_image_energies)
             d["deltaE_maxmin"] = deltaE_maxmin            
-            deltaM_maxmin = max(list_image_mags) - min(list_image_mags)
-            d["deltaM_maxmin"] = deltaM_maxmin
-            
+        
+#INDENT THE NEXT LINES:
+            if not (list_image_mags[0] == None): #if ISPIN not 2, no mag info
+                image_mags = ' '.join(map(str,list_image_mags))
+                d["image_mags"] = image_mags
+                mag_contour = "-o-"
+                if len(image_list)==0:
+                    return None
+                for i in xrange(1,len(image_list)):
+                    if(list_image_mags[i]>list_image_mags[i-1]):
+                        mag_contour += "/-o-"
+                    elif list_image_mags[i]<list_image_mags[i-1]:
+                        mag_contour += "\\-o-"
+                    else:
+                        mag_contour += "=-o-"
+                d["mag_contour"] = mag_contour
+                deltaM_firstmax = max(list_image_mags) - list_image_mags[0]
+                d["deltaM_firstmax"] = deltaM_firstmax
+                deltaM_lastmax = max(list_image_mags) - list_image_mags[-1]
+                d["deltaM_lastmax"] = deltaM_lastmax
+                deltaM_endpoints = list_image_mags[-1] - list_image_mags[0]
+                d["deltaM_endpoints"] = deltaM_endpoints
+                deltaM_maxmin = max(list_image_mags) - min(list_image_mags)
+                d["deltaM_maxmin"] = deltaM_maxmin
+
+
             d["type"] = "NEB"
 
             return d
