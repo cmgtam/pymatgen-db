@@ -22,6 +22,7 @@ import datetime
 import string
 import json
 import socket
+import util2
 from fnmatch import fnmatch
 from collections import OrderedDict
 
@@ -556,6 +557,8 @@ class VaspToDbTaskDrone(AbstractDrone):
                                "crystal_system": sg.get_crystal_system(),
                                "hall": sg.get_hall()}
             d["last_updated"] = datetime.datetime.today()
+            d["type"] = "VASP" #PS
+            
             return d
         except Exception as ex:
             logger.error("Error in " + os.path.abspath(dir_name) +
@@ -705,3 +708,218 @@ def get_uri(dir_name):
     except:
         hostname = socket.gethostname()
     return "{}:{}".format(hostname, fullpath)
+
+
+class NEBToDbTaskDrone(VaspToDbTaskDrone):
+    """
+    NEBToDbTaskDrone is the same as VaspToDbTaskDrone, except with additional processing
+    for NEB runs.
+    """
+
+    #Version of this db creator document.
+    __version__ = "2.0.0"
+
+    def __init__(self, host="127.0.0.1", port=27017, database="vasp",
+                 user=None, password=None,  collection="tasks",
+                 parse_dos=False, simulate_mode=False,
+                 additional_fields=None, update_duplicates=True,
+                 mapi_key=None):
+        NEBToDbTaskDrone.__init__(self,host,port,database,user,password,collection,parse_dos,simulate_mode,additional_fields,update_duplicates,mapi_key)
+        """
+        Args:
+            host:
+                Hostname of database machine. Defaults to 127.0.0.1 or
+                localhost.
+            port:
+                Port for db access. Defaults to mongo's default of 27017.
+            database:
+                Actual database to access. Defaults to "vasp".
+            user:
+                User for db access. Requires write access. Defaults to None,
+                which means no authentication.
+            password:
+                Password for db access. Requires write access. Defaults to
+                None, which means no authentication.
+            collection:
+                Collection to query. Defaults to "tasks".
+            parse_dos:
+                Whether to parse the DOS data where possible. Defaults to
+                False. If True, the dos will be inserted into a gridfs
+                collection called dos_fs.
+            simulate_mode:
+                Allows one to simulate db insertion without actually performing
+                the insertion.
+            additional_fields:
+                Dict specifying additional fields to append to each doc
+                inserted into the collection. For example, allows one to add
+                an author or tags to a whole set of runs for example.
+            update_duplicates:
+                If True, if a duplicate path exists in the collection, the
+                entire doc is updated. Else, duplicates are skipped.
+            mapi_key:
+                A Materials API key. If this key is supplied,
+                the insertion code will attempt to use the Materials REST API
+                to calculate stability data for inserted calculations.
+                Stability assessment requires a large quantity of materials
+                data. E.g., to compute the stability of a new LixFeyOz
+                calculation, you need to the energies of all known
+                phases in the Li-Fe-O chemical system. Using
+                the Materials API, we can obtain the pre-calculated data from
+                the Materials Project.
+
+                Go to www.materialsproject.org/profile to generate or obtain
+                your API key.
+        """
+    @classmethod
+    def generate_doc(cls, dir_name, vasprun_files, parse_dos,
+                     additional_fields):
+        """Process aflow style and NEB runs."""
+        try:
+            fullpath = os.path.abspath(dir_name)
+            #Defensively copy the additional fields first.  This is a MUST.
+            #Otherwise, parallel updates will see the same object and inserts
+            #will be overridden!!
+            d = {k: v for k, v in additional_fields.items()} \
+                if additional_fields else {}
+            d["dir_name"] = fullpath
+            d["schema_version"] = NEBToDbTaskDrone.__version__
+            d["calculations"] = [
+                cls.process_vasprun(dir_name, taskname, filename, parse_dos)
+                for taskname, filename in vasprun_files.items()]
+            d1 = d["calculations"][0]
+            d2 = d["calculations"][-1]
+
+            #Now map some useful info to the root level.
+            for root_key in ["completed_at", "nsites", "unit_cell_formula",
+                             "reduced_cell_formula", "pretty_formula",
+                             "elements", "nelements", "cif", "density",
+                             "is_hubbard", "hubbards", "run_type"]:
+                d[root_key] = d2[root_key]
+            d["chemsys"] = "-".join(sorted(d2["elements"]))
+            d["input"] = {"crystal": d1["input"]["crystal"]}
+            vals = sorted(d2["reduced_cell_formula"].values())
+            d["anonymous_formula"] = {string.ascii_uppercase[i]: float(vals[i])
+                                      for i in xrange(len(vals))}
+            d["output"] = {
+                "crystal": d2["output"]["crystal"],
+                "final_energy": d2["output"]["final_energy"],
+                "final_energy_per_atom": d2["output"]["final_energy_per_atom"]}
+            d["name"] = "aflow"
+            d["pseudo_potential"] = {"functional": "pbe", "pot_type": "paw",
+                                     "labels": d2["input"]["potcar"]}
+
+            if len(d["calculations"]) == 2 or \
+                    vasprun_files.keys()[0] != "relax1":
+                d["state"] = "successful" if d2["has_vasp_completed"] \
+                    else "unsuccessful"
+            else:
+                d["state"] = "stopped"
+
+            s = Structure.from_dict(d2["output"]["crystal"])
+            if not s.is_valid():
+                d["state"] = "errored_bad_structure"
+
+            d["analysis"] = get_basic_analysis_and_error_checks(d)
+
+            sg = SymmetryFinder(Structure.from_dict(d["output"]["crystal"]),
+                                0.1)
+            d["spacegroup"] = {"symbol": sg.get_spacegroup_symbol(),
+                               "number": sg.get_spacegroup_number(),
+                               "point_group": unicode(sg.get_point_group(),
+                                                      errors="ignore"),
+                               "source": "spglib",
+                               "crystal_system": sg.get_crystal_system(),
+                               "hall": sg.get_hall()}
+            d["last_updated"] = datetime.datetime.today()
+
+            # Process NEB runs. The energy and magnetic moments for each image are listed.
+            # Some useful values are calculated.
+
+            # Number of NEB images
+            image_list = []
+            for i in xrange(0,9):
+                append = "0"+str(i)
+                newpath = os.path.join(fullpath,append)
+                if os.path.exists(newpath):
+                    image_list.append(newpath)
+            d["num_images"] = len(image_list)
+
+            # Image energies and magnetic moments for specific folders
+            list_image_energies = []
+            list_image_mags = []
+            for i in xrange(0,len(image_list)):
+                append = "0"+str(i)
+                oszicar = os.path.join(fullpath,append,"OSZICAR")
+                if not os.path.isfile(oszicar):
+                    return None
+                val_energy = util2.getEnergy(oszicar)
+                val_mag = util2.getMag(oszicar)
+                d["E_"+append]= val_energy
+                d["mag_"+append]= val_mag
+                list_image_energies.append(val_energy)
+                list_image_mags.append(val_mag)
+
+            # List of image energies and magnetic moments in order 
+            image_energies = ' '.join(map(str,list_image_energies))
+            image_mags = ' '.join(map(str,list_image_mags))
+            d["image_energies"] = image_energies
+            d["image_mags"] = image_mags
+
+            # An simple way to visualize relative image energies and magnetic moments
+            energy_contour = "-x-"
+            if len(image_list)==0:
+                return None
+            for i in xrange(1,len(image_list)):
+                if(list_image_energies[i]>list_image_energies[i-1]):
+                    energy_contour += "/-x-"
+                elif list_image_energies[i]<list_image_energies[i-1]:
+                    energy_contour += "\\-x-"
+                else:
+                    energy_contour += "=-x-"
+            d["energy_contour"] = energy_contour
+
+            mag_contour = "-o-"
+            if len(image_list)==0:
+                return None
+            for i in xrange(1,len(image_list)):
+                if(list_image_mags[i]>list_image_mags[i-1]):
+                    mag_contour += "/-o-"
+                elif list_image_mags[i]<list_image_mags[i-1]:
+                    mag_contour += "\\-o-"
+                else:
+                    mag_contour += "=-o-"
+            d["mag_contour"] = mag_contour
+
+            # Difference between the first and maximum energies and magnetic moments
+            deltaE_firstmax = max(list_image_energies) - list_image_energies[0] 
+            d["deltaE_firstmax"] = deltaE_firstmax
+            deltaM_firstmax = max(list_image_mags) - list_image_mags[0]
+            d["deltaM_firstmax"] = deltaM_firstmax
+            
+            # Difference between the last and maximum energies and magnetic moments
+            deltaE_lastmax = max(list_image_energies) - list_image_energies[-1]
+            d["deltaE_lastmax"] = deltaE_lastmax
+            deltaM_lastmax = max(list_image_mags) - list_image_mags[-1]
+            d["deltaM_lastmax"] = deltaM_lastmax
+
+            # Difference between the endpoint energies and magnetic moments
+            deltaE_endpoints = list_image_energies[-1] - list_image_energies[0]
+            d["deltaE_endpoints"] = deltaE_endpoints
+            deltaM_endpoints = list_image_mags[-1] - list_image_mags[0]
+            d["deltaM_endpoints"] = deltaM_endpoints
+
+            # Difference between the minimum and maximum energies and magnetic moments
+            deltaE_maxmin = max(list_image_energies) - min(list_image_energies)
+            d["deltaE_maxmin"] = deltaE_maxmin            
+            deltaM_maxmin = max(list_image_mags) - min(list_image_mags)
+            d["deltaM_maxmin"] = deltaM_maxmin
+            
+            d["type"] = "NEB"
+
+            return d
+
+        except Exception as ex:
+            logger.error("Error in " + os.path.abspath(dir_name) +
+                         ".\nError msg: " + str(ex))
+            return None
+
