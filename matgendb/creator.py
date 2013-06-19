@@ -724,7 +724,7 @@ class NEBToDbTaskDrone(VaspToDbTaskDrone):
                  parse_dos=False, simulate_mode=False,
                  additional_fields=None, update_duplicates=True,
                  mapi_key=None):
-        NEBToDbTaskDrone.__init__(self,host,port,database,user,password,collection,parse_dos,simulate_mode,additional_fields,update_duplicates,mapi_key)
+        VaspToDbTaskDrone.__init__(self,host,port,database,user,password,collection,parse_dos,simulate_mode,additional_fields,update_duplicates,mapi_key)
         """
         Args:
             host:
